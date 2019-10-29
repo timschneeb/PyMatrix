@@ -10,7 +10,7 @@ sys.setdefaultencoding('utf8')
 
 from base import Base
 from rgbmatrix import graphics, RGBMatrix, RGBMatrixOptions
-import datetime
+import datetime, base64
 
 os.chdir("/home/pi/Matrix")
 
@@ -25,8 +25,8 @@ class RunText(Base):
         # General
         self.requestPowerChange = 0  # 0 No, 1 Off, 2 On/Unused!
         self.simulatebutton = False
-        self.forcePowerOn = True  # False
-        self.power = True  # False
+        self.forcePowerOn = False  # False
+        self.power = False  # False
         self.queue = Queue()
         self.defaultscene = 0
         self.scene = 0
@@ -62,10 +62,10 @@ class RunText(Base):
         self.actionCountIncrease = 0
 
         # Notifications
-        self.allowContent = {"Google", "Notificator", "Google Play Store", "Gmail"}
-        self.blacklistedApps = {"Paket-Installer", "Game Tools", "YouTube", "reddit offline"}
-        self.blacklistedTitles = {"Sound Assistant wird über anderen Apps angezeigt",
-                                  "Google Play Dienste wird über anderen Apps angezeigt"}
+        self.allowContent = {"Reddit", "Pokémon Go", "Google", "Notificator", "Google Play Store", "Gmail", "Telegram"}
+        self.blacklistedApps = {"ViPER4Android FX", "James DSP", "Android-System", "Opera", "Game Tools", "YouTube",
+                                "reddit offline"}
+        self.blacklistedTitles = {}
 
         # Scene 1
         self.pulseClockS1 = False
@@ -113,7 +113,8 @@ class RunText(Base):
                     self.DrawAll(offscreen_canvas, font, font2, bigfont, bigfont2)
                     if self.requestPowerChange == 0: powered = True
                 if powered and gpio_btn and (
-                        self.scrollString == "" and not (self.forcePowerOn or self.simulatebutton)):
+                        self.scrollString == "" and self.queue.empty() and self.actionQueue.empty() and not (
+                        self.forcePowerOn or self.simulatebutton)):
                     self.requestPowerChange = 1
                     self.loopLCount = 0
                     powered = False
@@ -191,6 +192,10 @@ class RunText(Base):
             self.power = True
             self.SwitchScene(2)
             self.flickerenabletime = time.time()
+        elif a.startswith("stopflicker"):
+            self.simulatebutton = False
+            self.flickerduration = -1
+            self.SwitchScene(self.defaultscene)
         elif a.startswith("scene"):
             data = re.sub('[^0-9]', '', a)
             self.power = True
@@ -204,6 +209,11 @@ class RunText(Base):
                 self.HandleNotification(data[1], data[2])
             else:
                 self.HandleNotification(data[1], data[2], data[3])
+        elif a == "usonic":
+            self.forcePowerOn = True  # False
+            self.power = True
+            self.spowerduration = 4
+            self.spowerenabletime = time.time()
 
     def SetActionCounter(self, count, max, reset, increase):
         if not count == -1: self.actionCount = count
@@ -222,14 +232,16 @@ class RunText(Base):
             self.power = True
             color = self.GetColorByName(app)
             if app in self.allowContent:
-                self.AddToQueue(app + ": " + title + "; " + content + "|||" + color)
+                self.AddToQueue(app + ": " + title + "; " + content, color)
             else:
-                self.AddToQueue(app + ": " + title + "|||" + color)
+                self.AddToQueue(app + ": " + title, color)
 
     def GetColorByName(self, app):
         if app == "WhatsApp":
             return "0,255,0"
         elif app == "Twitter":
+            return "0,174,255"
+        elif app == "Telegram":
             return "0,70,255"
         else:
             return "255,255,255"
@@ -237,9 +249,9 @@ class RunText(Base):
     # Queue
     def AddToQueue(self, text, color=""):
         if color == "":
-            self.queue.put(text)
+            self.queue.put(base64.b64encode(text.encode('utf-8')))
         else:
-            self.queue.put(text + "|||" + color)
+            self.queue.put(base64.b64encode(text.encode('utf-8')) + ";" + base64.b64encode(color.encode('utf-8')))
 
     def AddToActionQueue(self, text):
         self.actionQueue.put(text)
@@ -247,12 +259,17 @@ class RunText(Base):
     # Power
     def HandlePowerOff(self, offscreen_canvas, font, font2, bigfont, bigfont2):
         if self.requestPowerChange == 1:
+            if (not self.scrollString == "") or (not self.queue.empty()) or not self.actionQueue.empty():
+                self.printLog("Queue not empty; ignoring power change request", "PWRM")
+                return
+            self.forcePowerOn = False
             self.DrawAll(offscreen_canvas, font, font2, bigfont, bigfont2)
             for y in range(0, self.loopLCount):
                 graphics.DrawLine(offscreen_canvas, 0, y, 64, y, graphics.Color(0, 0, 0))
             if self.loopLCount > 32:
                 self.loopLCount = 0;
                 self.requestPowerChange = 0
+
                 self.power = False
             self.loopLCount += 1
     #Pipe
@@ -261,9 +278,17 @@ class RunText(Base):
             message = pipe.read()
             if message:
                 if message.find('%ACT:') == -1:
-                    self.printLog("Text: '%s'" % message.rstrip(), "PIPE")
+                    data = re.split(";", message)
+                    if len(data) <= 1:
+                        decoded = base64.b64decode(message).decode('UTF-8')
+                        self.printLog("Text: '%s'" % decoded.rstrip(), "PIPE")
+                        self.AddToQueue(decoded.rstrip())
+                    else:
+                        decoded = base64.b64decode(data[0]).decode('UTF-8')
+                        decoded2 = base64.b64decode(data[1]).decode('UTF-8')
+                        self.AddToQueue(decoded.rstrip(), decoded2)
                     self.power = True
-                    self.AddToQueue(message.rstrip())
+                    self.printLog("Text: '%s'" % decoded.rstrip(), "PIPE")
                 else:
                     try:
                         self.printLog("Action: '%s'" % message.split(":")[1].rstrip(), "PIPE")
@@ -283,7 +308,7 @@ class RunText(Base):
         if self.scene == 0:
             self.DrawClock(offscreen_canvas, bigfont, 3, 10, True, False)
             self.DrawSeconds(offscreen_canvas, bigfont2, 50)
-            self.DrawScrollMessage(offscreen_canvas, bigfont2, 21)
+            self.DrawScrollMessage(offscreen_canvas, font2, 21)
             self.ConstructStatusBar()
         elif self.scene == 1:
             self.DrawClock(offscreen_canvas, font)
@@ -314,7 +339,7 @@ class RunText(Base):
             self.loopHCount += 1
         else:
             self.loopHCount = 0
-        #Network
+        # Networ
         thr = threading.Thread(target=self.CheckNet, args=(), kwargs={})
         if not self.netCheckOngoing: thr.start()
         if self.showNetWarning:
@@ -349,17 +374,18 @@ class RunText(Base):
         if self.scrollPosition + self.scrollLength * 6 < 0 or self.scrollString == "":
             if not self.queue.empty():
                 string = self.queue.get()
-                data = re.split("\|\|\|", string)
+                data = re.split(";", string)
+                self.scrollPosition = self.matrix.width
                 if len(data) <= 1:
-                    self.scrollLength = len(string)
-                    self.scrollString = string
+                    self.scrollLength = len(base64.b64decode(data[0]).decode('UTF-8'))
+                    self.scrollString = base64.b64decode(data[0]).decode('UTF-8')
                     self.scrollR = 255
                     self.scrollG = 255
                     self.scrollB = 255
                 else:
-                    self.scrollLength = len(data[0])
-                    self.scrollString = data[0]
-                    color = data[1].split(",")
+                    self.scrollLength = len(base64.b64decode(data[0]).decode('UTF-8'))
+                    self.scrollString = base64.b64decode(data[0]).decode('UTF-8')
+                    color = base64.b64decode(data[1]).decode('UTF-8').split(",")
                     if len(color) == 3:
                         self.scrollR = int(color[0])
                         self.scrollG = int(color[1])
@@ -380,40 +406,35 @@ class RunText(Base):
             digitColor = graphics.Color(255, 125, 0)
         seperatorColor = graphics.Color(255, 0, 0)
         if not small:
-            lenCStart = graphics.DrawText(offscreen_canvas, font, x, y, seperatorColor, "<")
-        else:
-            lenCStart = 0
+            x += graphics.DrawText(offscreen_canvas, font, x, y, seperatorColor, "<")
 
-        lenCHour = graphics.DrawText(offscreen_canvas, font, x + lenCStart, y,digitColor ,
+        x += graphics.DrawText(offscreen_canvas, font, x, y, digitColor,
                                      time.strftime('%H'))
-        lenCSep = graphics.DrawText(offscreen_canvas, font, x + lenCStart + lenCHour, y,
+        x += graphics.DrawText(offscreen_canvas, font, x, y,
                                     seperatorColor, ":")
-        lenCMin = graphics.DrawText(offscreen_canvas, font, x + lenCStart + lenCHour + lenCSep, y,
+        x += graphics.DrawText(offscreen_canvas, font, x, y,
                                     digitColor, time.strftime('%M'))
 
         if not small:
-            lenCSep2 = graphics.DrawText(offscreen_canvas, font, x + lenCStart + lenCHour + lenCSep + lenCMin, y,
+            x += graphics.DrawText(offscreen_canvas, font, x, y,
                                          seperatorColor, ":")
-        else:
-            lenCSep2 = 0
+
         if not small:
-            lenCSec = graphics.DrawText(offscreen_canvas, font,
-                                        x + lenCStart + lenCHour + lenCSep + lenCMin + lenCSep2, y,
+            x += graphics.DrawText(offscreen_canvas, font,
+                                   x, y,
                                         digitColor, time.strftime('%S'))
-        else:
-            lenCSec = 0
+
         if not small:
-            lenCEnd = graphics.DrawText(offscreen_canvas, font,
-                                        x + lenCStart + lenCHour + lenCSep + lenCMin + lenCSep2 + lenCSec, y,
+            x += graphics.DrawText(offscreen_canvas, font,
+                                   x, y,
                                         seperatorColor, ">")
-        else:
-            lenCEnd = 0
+        return x
 
     def DrawSeconds(self, offscreen_canvas, font, x=3, y=10):
-        lenCSec = graphics.DrawText(offscreen_canvas, font,
+        x += graphics.DrawText(offscreen_canvas, font,
                                     x, y,
                                     graphics.Color(255, 125, 0), time.strftime('%S'))
-
+        return x
     def InitFont(self, path):
         font = graphics.Font()
         font.LoadFont(path)
